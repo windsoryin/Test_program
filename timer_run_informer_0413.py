@@ -42,17 +42,18 @@ global site_name
 # 定时系统
 def job():  # 定时任务
     print("I'm working...")
-    now_time = time.time()  # 程序错误，导致需要手动减8h
+    now_time = time.time()
     time_interval = seq_len / 12 * 60 * 60  # 8小时的历史数据 = seqlen=96
-    history_time = now_time - time_interval
+    history_time = now_time - time_interval - 10*60  # 8小时的历史数据 = seqlen=96; 10*60: 预留空间
+    site_name = 'B_04'  #读取xx站点的数据库
     print(time.strftime("%Y/%m/%d %H:%M:%S", time.localtime(history_time)))  # 当前时间
-    get_data(now_time, history_time)
+    get_data(now_time, history_time, site_name)
     run_model()
     write_database(site_name)
     print('successfully done')
 
 
-def read_database(index_name, start_t, end_t):
+def read_database(index_name, start_t, end_t, site_name):
     # 读取数据库数据
     # index_name：
     # 1、HWS气象数据：hws @ *
@@ -67,11 +68,19 @@ def read_database(index_name, start_t, end_t):
     df.print_schema()
     # 查询事例  1、filter：时间过滤、设备过滤； 2、select查询所有字段  3、sort以什么字段进行排序  4、限制返回数量
     # 其他用法参考：https://github.com/onesuper/pandasticsearch
-    data = df.filter((df['timestamp'] > start_t) & (df['timestamp'] < end_t) & (df['device'] == 'B04')) \
-        .select(*df.columns) \
-        .sort(df["timestamp"].asc) \
-        .limit(100000) \
-        .to_pandas()
+
+    time_segment = np.linspace(start_t, end_t, 8)  # 简单实现分段读取数据库
+    for i in range(len(time_segment)-1):  # 简单实现分段读取数据库
+        tmp_data = df.filter((df['timestamp'] > time_segment[i]) & (df['timestamp'] <= time_segment[i+1]) & (df['device'] == site_name)) \
+            .select(*df.columns) \
+            .sort(df["timestamp"].asc) \
+            .limit(100000) \
+            .to_pandas()
+        if i == 0:
+            data = tmp_data
+        else:
+            data = pd.concat([data, tmp_data], axis=0, ignore_index=True)
+
     return data
 
 
@@ -139,12 +148,12 @@ def calc_pwv(ztd, t, p, lat, height):
     return pwv
 
 
-def get_data(now_time, history_time):
+def get_data(now_time, history_time, site_name):
     gnss = 'gnss@*'
     hws = 'hws@*'
     end_t = now_time
     start_t = history_time
-    gnss_data = read_database(gnss, start_t, end_t)
+    gnss_data = read_database(gnss, start_t, end_t, site_name)
     if len(gnss_data) > 0:
         gnss_data['timestamp'] = gnss_data['timestamp'].astype(int)
         gnss_data['ztd'] = gnss_data['ztd'].astype(float)
@@ -152,7 +161,7 @@ def get_data(now_time, history_time):
         gnss_data['longitude'] = gnss_data['longitude'].astype(float)
         gnss_data['height'] = gnss_data['height'].astype(float)
         gnss_data['time'] = pd.to_datetime(gnss_data['time'], unit='s')
-    hws_data = read_database(hws, start_t, end_t)
+    hws_data = read_database(hws, start_t, end_t,site_name)
     if len(hws_data) > 0:
         hws_data['time'] = pd.to_datetime(hws_data['time'], unit='s')
         hws_data['timestamp'] = hws_data['timestamp'].astype(int)
@@ -167,7 +176,8 @@ def get_data(now_time, history_time):
     """
     读取数据，写入csv文件中
     """
-    resamp_data.iloc[:, 0:8] = resamp_data.iloc[:, 0:8].interpolate(method='linear', order=1, limit=10, limit_direction='both')  #
+    resamp_data.iloc[:, 0:8] = resamp_data.iloc[:, 0:8].interpolate(method='linear', order=1, limit=10,
+                                                                    limit_direction='both')  #
     resamp_data["t2m(k)"] = resamp_data["t2m(k)"].astype(float)
     resamp_data["t2m(k)"] = resamp_data[["t2m(k)"]].apply(lambda x: x["t2m(k)"] + 273.15, axis=1)
     resamp_data["d2m(k)"] = resamp_data["d2m(k)"].astype(float)
@@ -183,7 +193,7 @@ def get_data(now_time, history_time):
     #
     data_csv = resamp_data[['date', 't2m(k)', 'sp(Pa)', 'd2m(k)']]  # 重组数据
     data_csv.insert(4, 'pwv', pwv)
-    data_csv.insert(5, 'tp', resamp_data.loc[:,'tp'])     #重组数据
+    data_csv.insert(5, 'tp', resamp_data.loc[:, 'tp'])  # 重组数据
 
     data_csv.to_csv('./real_data/{}.csv'.format(site_name), index=False)
     print('done')
@@ -201,6 +211,7 @@ def write_database(site_name):
     loaddata = np.load(
         './results/informer_ftMS_sl96_ll48_pl24_dm512_nh8_el2_dl1_df2048_atprob_fc5_ebtimeF_dtTrue_mxTrue_test_0/real_prediction_{}.npy'.format(
             site_name))
+    pd.DataFrame(loaddata, )
 
     es = Elasticsearch(hosts=["42.193.247.49:9200"], http_auth=('gnss', 'YKY7csX#'),
                        scheme="http")
@@ -217,7 +228,7 @@ def write_database(site_name):
 
 # schedule.every().hour.at('55:05').do(job)  # 在每小时的00分00秒开始，定时任务job
 schedule.every(10).seconds.do(job)
-seq_len = 12
+seq_len = 96
 site_name = 'wh_kc'
 while True:
     schedule.run_pending()
